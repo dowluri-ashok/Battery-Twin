@@ -4,8 +4,40 @@ import pandas as pd
 
 import plotly.graph_objects as go
 
+import hmac
+
+# =========================
+# PASSWORD PROTECTION
+# =========================
+
+def check_password():
+    if st.session_state.get("authenticated", False):
+        return True
+
+    st.title("🔐 Battery Twin — Secure Access")
+    st.write("Enter the password to access the Battery Digital Twin platform.")
+
+    password = st.text_input(
+        "Password",
+        type="password",
+        key="login_password"
+    )
+
+    if st.button("Login", type="primary"):
+        if hmac.compare_digest(
+            password,
+            st.secrets["APP_PASSWORD"]
+        ):
+            st.session_state["authenticated"] = True
+            st.rerun()
+        else:
+            st.error("❌ Incorrect password")
+
+    return False
 
 
+if not check_password():
+    st.stop()
 
 
 # ============================================================
