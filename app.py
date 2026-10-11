@@ -1,14 +1,36 @@
 import streamlit as st
 
+import hmac
+
+import math
+
 import pandas as pd
+
+import numpy as np
 
 import plotly.graph_objects as go
 
-import hmac
+# ============================================================
 
-# =========================
+# PAGE CONFIGURATION
+
+# ============================================================
+
+st.set_page_config(
+
+    page_title="BatteryTwin",
+
+    page_icon="🔋",
+
+    layout="wide"
+
+)
+
+# ============================================================
+
+# ============================================================
 # PASSWORD PROTECTION
-# =========================
+# ============================================================
 
 def check_password():
     if st.session_state.get("authenticated", False):
@@ -24,10 +46,13 @@ def check_password():
     )
 
     if st.button("Login", type="primary"):
-        if hmac.compare_digest(
-            password,
-            st.secrets["APP_PASSWORD"]
-        ):
+        try:
+            correct_password = st.secrets["APP_PASSWORD"]
+        except Exception:
+            st.error("APP_PASSWORD is not configured in Streamlit secrets.")
+            return False
+
+        if hmac.compare_digest(password, correct_password):
             st.session_state["authenticated"] = True
             st.rerun()
         else:
@@ -40,35 +65,9 @@ if not check_password():
     st.stop()
 
 
-# ============================================================
-
-# PAGE CONFIGURATION
-
-# ============================================================
-
-
-
-st.set_page_config(
-
-    page_title="BatteryTwin",
-
-    page_icon="🔋",
-
-    layout="wide"
-
-)
-
-
-
-
-
-# ============================================================
-
 # FILE NAMES
 
 # ============================================================
-
-
 
 BASELINE_FILE = "Battery_Case_1_1p225A.csv"
 
@@ -76,23 +75,16 @@ DESIGN_A_FILE = "Battery_Case_2_2A.csv"
 
 DESIGN_B_FILE = "Battery_Design_B_Thermal.csv"
 
-
-
 VALIDATION_FILE = "Battery_Case_2_2p5A.csv"
 
 OVERCURRENT_FILE = "Battery_Case_3_3A.csv"
-
-
-
-
+VALIDATION_RESULTS_FILE = "Battery_Twin_Validation_Results.csv"
 
 # ============================================================
 
 # SAFETY LIMITS
 
 # ============================================================
-
-
 
 OVER_CURRENT_LIMIT = 2.5
 
@@ -104,23 +96,15 @@ WARNING_TEMPERATURE = 45.0
 
 CRITICAL_TEMPERATURE = 60.0
 
-
-
-
-
 # ============================================================
 
 # SIDEBAR
 
 # ============================================================
 
-
-
 st.sidebar.title("🔋 BatteryTwin")
 
 st.sidebar.caption("Battery Energy System Digital Twin")
-
-
 
 page = st.sidebar.radio(
 
@@ -138,6 +122,7 @@ page = st.sidebar.radio(
 
         "🛡️ Safety Analysis",
 
+        "🧪 Validation & Scenario Testing",
         "🧠 Decision Support",
 
         "🔗 Traceability"
@@ -146,27 +131,17 @@ page = st.sidebar.radio(
 
 )
 
-
-
-
-
 # ============================================================
 
 # HELPER FUNCTIONS
 
 # ============================================================
 
-
-
 @st.cache_data
 
 def load_data(filename):
 
     return pd.read_csv(filename)
-
-
-
-
 
 def prepare_data(df, max_points=1000):
 
@@ -182,29 +157,15 @@ def prepare_data(df, max_points=1000):
 
         return df.iloc[::step].copy()
 
-
-
     return df.copy()
-
-
-
-
 
 def calculate_metrics(df):
 
-
-
     final_voltage = df["Voltage"].iloc[-1]
-
-
 
     final_soc = df["SOC"].iloc[-1] * 100
 
-
-
     max_temperature = df["Temperature"].max() - 273.15
-
-
 
     temperature_rise = (
 
@@ -214,23 +175,13 @@ def calculate_metrics(df):
 
     )
 
-
-
     max_current = df["Current"].max()
-
-
 
     average_power = df["Power"].mean()
 
-
-
     max_power_loss = df["PowerLoss"].max()
 
-
-
     fault = int(df["BatteryFault"].max())
-
-
 
     return {
 
@@ -252,33 +203,109 @@ def calculate_metrics(df):
 
     }
 
-
-
-
-
 # ============================================================
+
+def run_dynamic_battery_twin(
+
+    capacity_ah, current_a, initial_soc_pct, ambient_temp_c,
+
+    rth_k_per_w, cth_j_per_k, simulation_time_s,
+
+    over_current_limit=OVER_CURRENT_LIMIT, over_voltage_limit=OVER_VOLTAGE_LIMIT,
+
+    under_voltage_limit=UNDER_VOLTAGE_LIMIT, warning_temperature_c=WARNING_TEMPERATURE,
+
+    critical_temperature_c=CRITICAL_TEMPERATURE,
+
+):
+
+    """Interactive reduced-order battery twin for Streamlit Cloud."""
+
+    capacity_ah = max(float(capacity_ah), 0.1)
+
+    current_a = max(float(current_a), 0.0)
+
+    initial_soc = min(max(float(initial_soc_pct) / 100.0, 0.0), 1.0)
+
+    ambient_k = float(ambient_temp_c) + 273.15
+
+    rth = max(float(rth_k_per_w), 0.1)
+
+    cth = max(float(cth_j_per_k), 10.0)
+
+    sim_time = max(float(simulation_time_s), 1.0)
+
+    r0, r1, c1, r_int = 0.010, 0.010, 1000.0, 0.010
+
+    soc_bp = np.linspace(0.0, 1.0, 11)
+
+    ocv_table = np.array([3.00, 3.20, 3.35, 3.48, 3.58, 3.72, 3.78, 3.84, 3.92, 4.05, 4.20])
+
+    dt = max(1.0, float(math.ceil(sim_time / 5000.0)))
+
+    time_s = np.arange(0.0, sim_time + dt, dt)
+
+    if time_s[-1] > sim_time: time_s[-1] = sim_time
+
+    soc = np.empty(len(time_s)); voltage = np.empty(len(time_s)); temperature_k = np.empty(len(time_s))
+
+    power = np.empty(len(time_s)); power_loss = np.empty(len(time_s)); battery_fault = np.zeros(len(time_s), dtype=int)
+
+    rc_voltage = 0.0; soc[0] = initial_soc; temperature_k[0] = ambient_k
+
+    for k in range(len(time_s)):
+
+        ocv = float(np.interp(soc[k], soc_bp, ocv_table))
+
+        voltage[k] = ocv - current_a * r0 - rc_voltage
+
+        power[k] = voltage[k] * current_a
+
+        power_loss[k] = current_a ** 2 * r0
+
+        temp_c = temperature_k[k] - 273.15
+
+        battery_fault[k] = int(current_a > over_current_limit or voltage[k] > over_voltage_limit or voltage[k] < under_voltage_limit or soc[k] < 0.10 or temp_c > critical_temperature_c)
+
+        if k == len(time_s) - 1: break
+
+        step = time_s[k + 1] - time_s[k]
+
+        soc[k + 1] = max(0.0, soc[k] - current_a * step / (capacity_ah * 3600.0))
+
+        rc_voltage += (current_a / c1 - rc_voltage / (r1 * c1)) * step
+
+        heat_generation = current_a ** 2 * r_int
+
+        heat_rejection = (temperature_k[k] - ambient_k) / rth
+
+        temperature_k[k + 1] = temperature_k[k] + ((heat_generation - heat_rejection) / cth) * step
+
+    ocv_final = float(np.interp(soc[-1], soc_bp, ocv_table))
+
+    voltage[-1] = ocv_final - current_a * r0 - rc_voltage
+
+    power[-1] = voltage[-1] * current_a; power_loss[-1] = current_a ** 2 * r0
+
+    final_temp_c = temperature_k[-1] - 273.15
+
+    battery_fault[-1] = int(current_a > over_current_limit or voltage[-1] > over_voltage_limit or voltage[-1] < under_voltage_limit or soc[-1] < 0.10 or final_temp_c > critical_temperature_c)
+
+    return pd.DataFrame({"Time": time_s, "Voltage": voltage, "Current": np.full(len(time_s), current_a), "SOC": soc, "Temperature": temperature_k, "Power": power, "PowerLoss": power_loss, "BatteryFault": battery_fault})
 
 # OVERVIEW
 
 # ============================================================
 
-
-
 if page == "🏠 Overview":
 
-
-
     st.title("🔋 BatteryTwin")
-
-
 
     st.subheader(
 
         "Battery Energy System Digital Twin Platform"
 
     )
-
-
 
     st.write(
 
@@ -290,15 +317,9 @@ if page == "🏠 Overview":
 
     )
 
-
-
     st.divider()
 
-
-
     st.header("🎯 Platform Objective")
-
-
 
     st.write(
 
@@ -310,11 +331,7 @@ if page == "🏠 Overview":
 
     )
 
-
-
     col1, col2, col3 = st.columns(3)
-
-
 
     with col1:
 
@@ -326,8 +343,6 @@ if page == "🏠 Overview":
 
         )
 
-
-
     with col2:
 
         st.info(
@@ -337,8 +352,6 @@ if page == "🏠 Overview":
             "Monitor electrical, thermal and safety behaviour."
 
         )
-
-
 
     with col3:
 
@@ -350,15 +363,9 @@ if page == "🏠 Overview":
 
         )
 
-
-
     st.divider()
 
-
-
     st.header("🔄 Digital Twin Workflow")
-
-
 
     st.markdown(
 
@@ -374,15 +381,9 @@ if page == "🏠 Overview":
 
     )
 
-
-
     st.divider()
 
-
-
     st.header("🏗️ Current Digital Twin Architecture")
-
-
 
     architecture = pd.DataFrame({
 
@@ -410,17 +411,15 @@ if page == "🏠 Overview":
 
             "Voltage / Current / Temperature / SOC limits",
 
-            "MATLAB/Simulink → CSV",
+            "MATLAB/Simulink → CSV + Python interactive twin",
 
-            "Python + Pandas",
+            "Python + Pandas + NumPy",
 
             "BatteryTwin dashboard"
 
         ]
 
     })
-
-
 
     st.dataframe(
 
@@ -432,25 +431,15 @@ if page == "🏠 Overview":
 
     )
 
-
-
-
-
 # ============================================================
 
 # CONFIGURE
 
 # ============================================================
 
-
-
 elif page == "⚙️ Configure":
 
-
-
     st.title("⚙️ Battery Configuration")
-
-
 
     st.write(
 
@@ -460,15 +449,9 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     st.divider()
 
-
-
     col1, col2 = st.columns(2)
-
-
 
     # --------------------------------------------------------
 
@@ -476,15 +459,9 @@ elif page == "⚙️ Configure":
 
     # --------------------------------------------------------
 
-
-
     with col1:
 
-
-
         st.subheader("🔋 Electrical Parameters")
-
-
 
         capacity = st.number_input(
 
@@ -498,8 +475,6 @@ elif page == "⚙️ Configure":
 
         )
 
-
-
         current = st.number_input(
 
             "Discharge Current (A)",
@@ -511,8 +486,6 @@ elif page == "⚙️ Configure":
             step=0.1
 
         )
-
-
 
         initial_soc = st.slider(
 
@@ -526,8 +499,6 @@ elif page == "⚙️ Configure":
 
         )
 
-
-
         ambient_temp = st.number_input(
 
             "Ambient Temperature (°C)",
@@ -538,23 +509,15 @@ elif page == "⚙️ Configure":
 
         )
 
-
-
     # --------------------------------------------------------
 
     # THERMAL PARAMETERS
 
     # --------------------------------------------------------
 
-
-
     with col2:
 
-
-
         st.subheader("🌡️ Thermal Parameters")
-
-
 
         rth = st.number_input(
 
@@ -568,8 +531,6 @@ elif page == "⚙️ Configure":
 
         )
 
-
-
         cth = st.number_input(
 
             "Thermal Capacitance (J/K)",
@@ -581,8 +542,6 @@ elif page == "⚙️ Configure":
             step=50.0
 
         )
-
-
 
         simulation_time = st.number_input(
 
@@ -596,19 +555,11 @@ elif page == "⚙️ Configure":
 
         )
 
-
-
     st.divider()
-
-
 
     st.subheader("🛡️ Protection Limits")
 
-
-
     limit_col1, limit_col2, limit_col3, limit_col4 = st.columns(4)
-
-
 
     limit_col1.metric(
 
@@ -618,8 +569,6 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     limit_col2.metric(
 
         "Over-Voltage",
@@ -627,8 +576,6 @@ elif page == "⚙️ Configure":
         f"{OVER_VOLTAGE_LIMIT:.1f} V"
 
     )
-
-
 
     limit_col3.metric(
 
@@ -638,8 +585,6 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     limit_col4.metric(
 
         "Critical Temperature",
@@ -648,19 +593,11 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     st.divider()
-
-
 
     st.subheader("📋 Current Configuration")
 
-
-
     config_col1, config_col2, config_col3, config_col4 = st.columns(4)
-
-
 
     config_col1.metric(
 
@@ -670,8 +607,6 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     config_col2.metric(
 
         "Current",
@@ -679,8 +614,6 @@ elif page == "⚙️ Configure":
         f"{current:.3f} A"
 
     )
-
-
 
     config_col3.metric(
 
@@ -690,8 +623,6 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     config_col4.metric(
 
         "Ambient",
@@ -700,19 +631,11 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     st.divider()
-
-
 
     st.subheader("🌡️ Thermal Configuration")
 
-
-
     thermal_col1, thermal_col2, thermal_col3 = st.columns(3)
-
-
 
     thermal_col1.metric(
 
@@ -722,8 +645,6 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     thermal_col2.metric(
 
         "Thermal Capacitance",
@@ -731,8 +652,6 @@ elif page == "⚙️ Configure":
         f"{cth:.0f} J/K"
 
     )
-
-
 
     thermal_col3.metric(
 
@@ -742,33 +661,59 @@ elif page == "⚙️ Configure":
 
     )
 
-
-
     st.success(
 
-        "Configuration ready. These parameters define "
+        "Configuration ready. The parameters below are now connected "
 
-        "the intended operating condition for the Digital Twin."
+        "to the interactive reduced-order Digital Twin."
 
     )
 
+    st.subheader("🔄 Interactive Simulation")
 
+    dynamic_data = run_dynamic_battery_twin(
+
+        capacity, current, initial_soc, ambient_temp, rth, cth, simulation_time,
+
+        OVER_CURRENT_LIMIT, OVER_VOLTAGE_LIMIT, UNDER_VOLTAGE_LIMIT,
+
+        WARNING_TEMPERATURE, CRITICAL_TEMPERATURE
+
+    )
+
+    st.session_state["dynamic_data"] = dynamic_data
+
+    st.session_state["dynamic_config"] = {
+
+        "capacity": capacity, "current": current, "initial_soc": initial_soc,
+
+        "ambient_temp": ambient_temp, "rth": rth, "cth": cth, "simulation_time": simulation_time
+
+    }
+
+    dynamic_metrics = calculate_metrics(dynamic_data)
+
+    result_col1, result_col2, result_col3, result_col4 = st.columns(4)
+
+    result_col1.metric("Final Voltage", f"{dynamic_metrics['Final Voltage (V)']:.2f} V")
+
+    result_col2.metric("Final SOC", f"{dynamic_metrics['Final SOC (%)']:.1f}%")
+
+    result_col3.metric("Max Temperature", f"{dynamic_metrics['Max Temperature (°C)']:.2f} °C")
+
+    result_col4.metric("Battery Fault", "YES" if dynamic_metrics["Fault"] else "NO")
 
     st.info(
 
-        "Note: the current prototype visualizes "
+        "Changing Capacity, Current, Initial SOC, Ambient Temperature, Thermal Resistance, "
 
-        "simulation-derived Simulink datasets. "
+        "Thermal Capacitance or Simulation Time automatically recalculates the interactive "
 
-        "Changing these fields does not yet launch a new "
+        "Digital Twin. The cloud model is a reduced-order engineering model; the Simulink "
 
-        "Simulink simulation automatically."
+        "model remains the reference/validation model."
 
     )
-
-
-
-
 
 # ============================================================
 
@@ -776,25 +721,17 @@ elif page == "⚙️ Configure":
 
 # ============================================================
 
-
-
 elif page == "🔋 Digital Twin":
-
-
 
     st.title("🔋 Digital Twin")
 
-
-
     st.write(
 
-        "Visualization of battery states generated from "
+        "Visualization of battery states from the Simulink reference "
 
-        "the Simulink battery-energy-system model."
+        "datasets or the interactive user-defined Digital Twin."
 
     )
-
-
 
     # --------------------------------------------------------
 
@@ -802,15 +739,11 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     baseline = load_data(BASELINE_FILE)
 
     design_a = load_data(DESIGN_A_FILE)
 
     design_b = load_data(DESIGN_B_FILE)
-
-
 
     baseline_plot = prepare_data(baseline)
 
@@ -818,53 +751,47 @@ elif page == "🔋 Digital Twin":
 
     design_b_plot = prepare_data(design_b)
 
+    available_designs = ["Baseline", "Design A", "Design B"]
 
+    if "dynamic_data" in st.session_state:
 
-    design = st.selectbox(
+        available_designs.append("Custom Configuration")
 
-        "Select Digital Twin Configuration",
-
-        [
-
-            "Baseline",
-
-            "Design A",
-
-            "Design B"
-
-        ]
-
-    )
-
-
+    design = st.selectbox("Select Digital Twin Configuration", available_designs)
 
     if design == "Baseline":
 
-
-
         data = baseline_plot
-
-
 
     elif design == "Design A":
 
-
-
         data = design_a_plot
 
-
-
-    else:
-
-
+    elif design == "Design B":
 
         data = design_b_plot
 
+    else:
 
+        data = prepare_data(st.session_state["dynamic_data"])
+
+        st.success("🟢 Showing live results from your latest user-defined configuration.")
+
+        cfg = st.session_state.get("dynamic_config", {})
+
+        if cfg:
+
+            st.caption(
+
+                f"Custom case: {cfg['capacity']:.2f} Ah | {cfg['current']:.2f} A | "
+
+                f"SOC {cfg['initial_soc']}% | Ambient {cfg['ambient_temp']:.1f} °C | "
+
+                f"Rth {cfg['rth']:.2f} K/W | Cth {cfg['cth']:.0f} J/K | Time {cfg['simulation_time']:.0f} s"
+
+            )
 
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -872,19 +799,11 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🔋 Battery State")
-
-
 
     final_voltage = data["Voltage"].iloc[-1]
 
-
-
     final_soc = data["SOC"].iloc[-1] * 100
-
-
 
     max_temperature = (
 
@@ -892,15 +811,9 @@ elif page == "🔋 Digital Twin":
 
     )
 
-
-
     max_current = data["Current"].max()
 
-
-
     metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
-
-
 
     with metric_col1:
 
@@ -912,8 +825,6 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     with metric_col2:
 
         st.metric(
@@ -923,8 +834,6 @@ elif page == "🔋 Digital Twin":
             f"{final_soc:.1f}%"
 
         )
-
-
 
     with metric_col3:
 
@@ -936,8 +845,6 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     with metric_col4:
 
         st.metric(
@@ -948,11 +855,7 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -960,19 +863,11 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🔋 Battery Voltage")
-
-
 
     voltage_plot = data.set_index("Time")[["Voltage"]]
 
-
-
     st.line_chart(voltage_plot)
-
-
 
     # --------------------------------------------------------
 
@@ -980,23 +875,13 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("📈 State of Charge")
-
-
 
     soc_plot = data.set_index("Time")[["SOC"]].copy()
 
-
-
     soc_plot["SOC"] = soc_plot["SOC"] * 100
 
-
-
     st.line_chart(soc_plot)
-
-
 
     # --------------------------------------------------------
 
@@ -1004,15 +889,9 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🌡️ Battery Temperature")
 
-
-
     temperature_plot = data.set_index("Time")[["Temperature"]].copy()
-
-
 
     temperature_plot["Temperature"] = (
 
@@ -1020,15 +899,9 @@ elif page == "🔋 Digital Twin":
 
     )
 
-
-
     temperature_plot.columns = ["Temperature (°C)"]
 
-
-
     st.line_chart(temperature_plot)
-
-
 
     # --------------------------------------------------------
 
@@ -1036,23 +909,13 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("⚡ Battery Power")
-
-
 
     power_plot = data.set_index("Time")[["Power"]]
 
-
-
     st.line_chart(power_plot)
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1060,19 +923,11 @@ elif page == "🔋 Digital Twin":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🛡️ Digital Twin Safety Status")
-
-
 
     fault = int(data["BatteryFault"].max())
 
-
-
     if fault == 1:
-
-
 
         st.error(
 
@@ -1080,11 +935,7 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     else:
-
-
 
         st.success(
 
@@ -1092,13 +943,9 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     # Current safety check
 
     if max_current > OVER_CURRENT_LIMIT:
-
-
 
         st.warning(
 
@@ -1110,13 +957,9 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     # Voltage safety checks
 
     if data["Voltage"].max() > OVER_VOLTAGE_LIMIT:
-
-
 
         st.warning(
 
@@ -1124,11 +967,7 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     if data["Voltage"].min() < UNDER_VOLTAGE_LIMIT:
-
-
 
         st.warning(
 
@@ -1136,13 +975,9 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     # Temperature safety checks
 
     if max_temperature > CRITICAL_TEMPERATURE:
-
-
 
         st.error(
 
@@ -1150,11 +985,7 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
     elif max_temperature > WARNING_TEMPERATURE:
-
-
 
         st.warning(
 
@@ -1162,25 +993,15 @@ elif page == "🔋 Digital Twin":
 
         )
 
-
-
-
-
 # ============================================================
 
 # DESIGN STUDIO
 
 # ============================================================
 
-
-
 elif page == "⚖️ Design Studio":
 
-
-
     st.title("⚖️ Design Studio")
-
-
 
     st.write(
 
@@ -1192,11 +1013,7 @@ elif page == "⚖️ Design Studio":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1204,23 +1021,17 @@ elif page == "⚖️ Design Studio":
 
     # --------------------------------------------------------
 
-
-
     baseline = load_data(BASELINE_FILE)
 
     design_a = load_data(DESIGN_A_FILE)
 
     design_b = load_data(DESIGN_B_FILE)
 
-
-
     # --------------------------------------------------------
 
     # DESIGN DICTIONARY
 
     # --------------------------------------------------------
-
-
 
     designs = {
 
@@ -1232,27 +1043,17 @@ elif page == "⚖️ Design Studio":
 
     }
 
-
-
     # --------------------------------------------------------
 
     # CALCULATE METRICS
 
     # --------------------------------------------------------
 
-
-
     results = []
-
-
 
     for name, df in designs.items():
 
-
-
         metrics = calculate_metrics(df)
-
-
 
         results.append({
 
@@ -1276,11 +1077,7 @@ elif page == "⚖️ Design Studio":
 
         })
 
-
-
     comparison = pd.DataFrame(results)
-
-
 
     # --------------------------------------------------------
 
@@ -1288,15 +1085,9 @@ elif page == "⚖️ Design Studio":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("📊 Design Comparison")
 
-
-
     display_table = comparison.copy()
-
-
 
     display_table["Final Voltage (V)"] = (
 
@@ -1304,15 +1095,11 @@ elif page == "⚖️ Design Studio":
 
     )
 
-
-
     display_table["Final SOC (%)"] = (
 
         display_table["Final SOC (%)"].round(1)
 
     )
-
-
 
     display_table["Max Temperature (°C)"] = (
 
@@ -1320,15 +1107,11 @@ elif page == "⚖️ Design Studio":
 
     )
 
-
-
     display_table["Temperature Rise (°C)"] = (
 
         display_table["Temperature Rise (°C)"].round(3)
 
     )
-
-
 
     display_table["Maximum Current (A)"] = (
 
@@ -1336,23 +1119,17 @@ elif page == "⚖️ Design Studio":
 
     )
 
-
-
     display_table["Average Power (W)"] = (
 
         display_table["Average Power (W)"].round(3)
 
     )
 
-
-
     display_table["Max Power Loss (W)"] = (
 
         display_table["Max Power Loss (W)"].round(4)
 
     )
-
-
 
     st.dataframe(
 
@@ -1364,11 +1141,7 @@ elif page == "⚖️ Design Studio":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1376,11 +1149,7 @@ elif page == "⚖️ Design Studio":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("⚡ Average Power Comparison")
-
-
 
     power_chart = comparison.set_index("Design")[
 
@@ -1388,11 +1157,7 @@ elif page == "⚖️ Design Studio":
 
     ]
 
-
-
     st.bar_chart(power_chart)
-
-
 
     # --------------------------------------------------------
 
@@ -1400,11 +1165,7 @@ elif page == "⚖️ Design Studio":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🌡️ Thermal Comparison")
-
-
 
     thermal_chart = comparison.set_index("Design")[
 
@@ -1418,11 +1179,7 @@ elif page == "⚖️ Design Studio":
 
     ]
 
-
-
     st.bar_chart(thermal_chart)
-
-
 
     # --------------------------------------------------------
 
@@ -1430,15 +1187,9 @@ elif page == "⚖️ Design Studio":
 
     # --------------------------------------------------------
 
-
-
     st.divider()
 
-
-
     st.subheader("🔎 Engineering Interpretation")
-
-
 
     baseline_temp = comparison.loc[
 
@@ -1448,8 +1199,6 @@ elif page == "⚖️ Design Studio":
 
     ].iloc[0]
 
-
-
     design_b_temp = comparison.loc[
 
         comparison["Design"] == "Design B",
@@ -1457,8 +1206,6 @@ elif page == "⚖️ Design Studio":
         "Temperature Rise (°C)"
 
     ].iloc[0]
-
-
 
     design_a_power = comparison.loc[
 
@@ -1468,8 +1215,6 @@ elif page == "⚖️ Design Studio":
 
     ].iloc[0]
 
-
-
     baseline_power = comparison.loc[
 
         comparison["Design"] == "Baseline",
@@ -1478,13 +1223,9 @@ elif page == "⚖️ Design Studio":
 
     ].iloc[0]
 
-
-
     # Avoid division by zero
 
     if baseline_temp != 0:
-
-
 
         thermal_reduction = (
 
@@ -1496,19 +1237,11 @@ elif page == "⚖️ Design Studio":
 
         )
 
-
-
     else:
-
-
 
         thermal_reduction = 0
 
-
-
     if baseline_power != 0:
-
-
 
         power_increase = (
 
@@ -1520,23 +1253,13 @@ elif page == "⚖️ Design Studio":
 
         )
 
-
-
     else:
-
-
 
         power_increase = 0
 
-
-
     col1, col2 = st.columns(2)
 
-
-
     with col1:
-
-
 
         st.metric(
 
@@ -1545,8 +1268,6 @@ elif page == "⚖️ Design Studio":
             f"{power_increase:.1f}%"
 
         )
-
-
 
         st.write(
 
@@ -1560,11 +1281,7 @@ elif page == "⚖️ Design Studio":
 
         )
 
-
-
     with col2:
-
-
 
         st.metric(
 
@@ -1573,8 +1290,6 @@ elif page == "⚖️ Design Studio":
             f"{thermal_reduction:.1f}%"
 
         )
-
-
 
         st.write(
 
@@ -1586,11 +1301,7 @@ elif page == "⚖️ Design Studio":
 
         )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1598,11 +1309,31 @@ elif page == "⚖️ Design Studio":
 
     # --------------------------------------------------------
 
+    if "dynamic_data" in st.session_state:
 
+        custom_metrics = calculate_metrics(st.session_state["dynamic_data"])
+
+        st.subheader("🧪 Custom Configuration Assessment")
+
+        custom_col1, custom_col2, custom_col3, custom_col4 = st.columns(4)
+
+        custom_col1.metric("Custom Power", f"{custom_metrics['Average Power (W)']:.2f} W")
+
+        custom_col2.metric("Custom Final SOC", f"{custom_metrics['Final SOC (%)']:.1f}%")
+
+        custom_col3.metric("Custom Temp Rise", f"{custom_metrics['Temperature Rise (°C)']:.3f} °C")
+
+        custom_col4.metric("Custom Safety", "FAULT" if custom_metrics["Fault"] else "SAFE")
+
+        if custom_metrics["Fault"]:
+
+            st.error("The current user-defined configuration violates at least one critical protection condition.")
+
+        else:
+
+            st.success("The current user-defined configuration remains within the modeled critical protection limits.")
 
     st.subheader("🏆 Preliminary Design Recommendation")
-
-
 
     st.success(
 
@@ -1618,25 +1349,15 @@ elif page == "⚖️ Design Studio":
 
     )
 
-
-
-
-
 # ============================================================
 
 # SAFETY ANALYSIS
 
 # ============================================================
 
-
-
 elif page == "🛡️ Safety Analysis":
 
-
-
     st.title("🛡️ Safety Analysis")
-
-
 
     st.write(
 
@@ -1648,11 +1369,7 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1660,15 +1377,9 @@ elif page == "🛡️ Safety Analysis":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🛡️ Defined Protection Limits")
 
-
-
     col1, col2, col3, col4 = st.columns(4)
-
-
 
     col1.metric(
 
@@ -1678,8 +1389,6 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     col2.metric(
 
         "Over-Voltage Limit",
@@ -1687,8 +1396,6 @@ elif page == "🛡️ Safety Analysis":
         "4.2 V"
 
     )
-
-
 
     col3.metric(
 
@@ -1698,8 +1405,6 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     col4.metric(
 
         "Critical Temperature",
@@ -1708,11 +1413,7 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1720,15 +1421,11 @@ elif page == "🛡️ Safety Analysis":
 
     # --------------------------------------------------------
 
-
-
     case_normal = load_data(
 
         VALIDATION_FILE
 
     )
-
-
 
     case_overcurrent = load_data(
 
@@ -1736,15 +1433,11 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     # --------------------------------------------------------
 
     # VALIDATION RESULTS
 
     # --------------------------------------------------------
-
-
 
     normal_fault = int(
 
@@ -1752,27 +1445,17 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     overcurrent_fault = int(
 
         case_overcurrent["BatteryFault"].max()
 
     )
 
-
-
     normal_current = case_normal["Current"].max()
-
-
 
     overcurrent_current = case_overcurrent["Current"].max()
 
-
-
     summary = pd.DataFrame({
-
-
 
         "Test Case": [
 
@@ -1782,8 +1465,6 @@ elif page == "🛡️ Safety Analysis":
 
         ],
 
-
-
         "Maximum Current (A)": [
 
             normal_current,
@@ -1792,8 +1473,6 @@ elif page == "🛡️ Safety Analysis":
 
         ],
 
-
-
         "Battery Fault": [
 
             normal_fault,
@@ -1801,8 +1480,6 @@ elif page == "🛡️ Safety Analysis":
             overcurrent_fault
 
         ],
-
-
 
         "Expected Result": [
 
@@ -1814,11 +1491,7 @@ elif page == "🛡️ Safety Analysis":
 
     })
 
-
-
     st.subheader("🧪 Safety Validation Cases")
-
-
 
     st.dataframe(
 
@@ -1830,11 +1503,7 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1842,15 +1511,9 @@ elif page == "🛡️ Safety Analysis":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🔍 Protection Logic Result")
 
-
-
     if normal_fault == 0:
-
-
 
         st.success(
 
@@ -1860,11 +1523,7 @@ elif page == "🛡️ Safety Analysis":
 
         )
 
-
-
     else:
-
-
 
         st.error(
 
@@ -1874,11 +1533,7 @@ elif page == "🛡️ Safety Analysis":
 
         )
 
-
-
     if overcurrent_fault == 1:
-
-
 
         st.error(
 
@@ -1888,11 +1543,7 @@ elif page == "🛡️ Safety Analysis":
 
         )
 
-
-
     else:
-
-
 
         st.warning(
 
@@ -1902,11 +1553,7 @@ elif page == "🛡️ Safety Analysis":
 
         )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -1914,15 +1561,9 @@ elif page == "🛡️ Safety Analysis":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("📈 Current Validation")
 
-
-
     fig_validation = go.Figure()
-
-
 
     fig_validation.add_trace(
 
@@ -1940,8 +1581,6 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     fig_validation.add_trace(
 
         go.Scatter(
@@ -1958,8 +1597,6 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     fig_validation.add_hline(
 
         y=OVER_CURRENT_LIMIT,
@@ -1969,8 +1606,6 @@ elif page == "🛡️ Safety Analysis":
         annotation_text="Over-current Limit"
 
     )
-
-
 
     fig_validation.update_layout(
 
@@ -1984,8 +1619,6 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     st.plotly_chart(
 
         fig_validation,
@@ -1994,11 +1627,7 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -2006,11 +1635,7 @@ elif page == "🛡️ Safety Analysis":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("✅ Safety Conclusion")
-
-
 
     st.write(
 
@@ -2020,15 +1645,11 @@ elif page == "🛡️ Safety Analysis":
 
         using simulation-derived operating cases.
 
-
-
         The 2.5 A case represents operation at the defined
 
         current protection threshold, while the 3.0 A case
 
         intentionally exceeds the 2.5 A limit.
-
-
 
         The over-current case successfully produces a
 
@@ -2042,25 +1663,383 @@ elif page == "🛡️ Safety Analysis":
 
     )
 
-
-
+# ============================================================
 
 
 # ============================================================
+# VALIDATION & SCENARIO TESTING
+# ============================================================
+
+elif page == "🧪 Validation & Scenario Testing":
+
+    st.title("🧪 Validation & Scenario Testing")
+
+    st.write(
+        "Evaluate multiple simulation scenarios against electrical, "
+        "thermal, energy and protection requirements."
+    )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # LOAD VALIDATION RESULTS
+    # --------------------------------------------------------
+
+    try:
+        validation_df = load_data(VALIDATION_RESULTS_FILE)
+    except FileNotFoundError:
+        st.error(
+            f"Validation results file not found: {VALIDATION_RESULTS_FILE}. "
+            "Place the CSV in the same folder as app.py."
+        )
+        st.stop()
+
+    required_columns = [
+        "Case",
+        "Capacity_Ah",
+        "Current_A",
+        "Initial_SOC_percent",
+        "Ambient_Temp_C",
+        "Rth_K_per_W",
+        "Cth_J_per_K",
+        "Simulation_Time_s",
+        "FinalVoltage_V",
+        "FinalSOC",
+        "FinalTemperature_C",
+        "MaximumTemperature_C",
+        "TemperatureRise_C",
+        "FinalPower_W",
+        "MaximumCurrent_A",
+        "BatteryFault",
+    ]
+
+    missing_columns = [
+        col for col in required_columns
+        if col not in validation_df.columns
+    ]
+
+    if missing_columns:
+        st.error(
+            "The validation CSV is missing these required columns: "
+            + ", ".join(missing_columns)
+        )
+        st.stop()
+
+    # --------------------------------------------------------
+    # SUMMARY TABLE
+    # --------------------------------------------------------
+
+    st.subheader("📋 Scenario Summary")
+
+    display_df = validation_df.copy()
+
+    display_df["Status"] = display_df["BatteryFault"].apply(
+        lambda x: "⚠️ FAULT" if int(x) == 1 else "✅ SAFE"
+    )
+
+    display_df["Final SOC (%)"] = display_df["FinalSOC"] * 100
+
+    display_df = display_df[
+        [
+            "Case",
+            "Capacity_Ah",
+            "Current_A",
+            "Initial_SOC_percent",
+            "FinalVoltage_V",
+            "Final SOC (%)",
+            "MaximumTemperature_C",
+            "TemperatureRise_C",
+            "FinalPower_W",
+            "MaximumCurrent_A",
+            "Status",
+        ]
+    ].copy()
+
+    display_df.columns = [
+        "Case",
+        "Capacity (Ah)",
+        "Current (A)",
+        "Initial SOC (%)",
+        "Final Voltage (V)",
+        "Final SOC (%)",
+        "Max Temperature (°C)",
+        "Temperature Rise (°C)",
+        "Final Power (W)",
+        "Maximum Current (A)",
+        "Status",
+    ]
+
+    st.dataframe(
+        display_df.round(3),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # KEY VALIDATION METRICS
+    # --------------------------------------------------------
+
+    st.subheader("📊 Validation Metrics")
+
+    total_cases = len(validation_df)
+    safe_cases = int((validation_df["BatteryFault"] == 0).sum())
+    fault_cases = int((validation_df["BatteryFault"] == 1).sum())
+    maximum_temperature = validation_df["MaximumTemperature_C"].max()
+    maximum_current = validation_df["MaximumCurrent_A"].max()
+
+    metric_col1, metric_col2, metric_col3, metric_col4 = st.columns(4)
+
+    metric_col1.metric("Scenarios Tested", f"{total_cases}")
+    metric_col2.metric("Safe Scenarios", f"{safe_cases}")
+    metric_col3.metric("Fault Scenarios", f"{fault_cases}")
+    metric_col4.metric("Peak Current", f"{maximum_current:.2f} A")
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # FINAL SOC COMPARISON
+    # --------------------------------------------------------
+
+    st.subheader("🔋 Final SOC Comparison")
+
+    fig_soc = go.Figure()
+
+    fig_soc.add_trace(
+        go.Bar(
+            x=validation_df["Case"],
+            y=validation_df["FinalSOC"] * 100,
+            name="Final SOC"
+        )
+    )
+
+    fig_soc.update_layout(
+        title="Final State of Charge by Scenario",
+        xaxis_title="Scenario",
+        yaxis_title="Final SOC (%)",
+        yaxis=dict(range=[0, 100]),
+        height=450
+    )
+
+    st.plotly_chart(fig_soc, use_container_width=True)
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # THERMAL RESPONSE
+    # --------------------------------------------------------
+
+    st.subheader("🌡️ Thermal Response")
+
+    fig_temp = go.Figure()
+
+    fig_temp.add_trace(
+        go.Bar(
+            x=validation_df["Case"],
+            y=validation_df["MaximumTemperature_C"],
+            name="Maximum Temperature"
+        )
+    )
+
+    fig_temp.update_layout(
+        title="Maximum Battery Temperature",
+        xaxis_title="Scenario",
+        yaxis_title="Maximum Temperature (°C)",
+        height=450
+    )
+
+    st.plotly_chart(fig_temp, use_container_width=True)
+
+    fig_temp_rise = go.Figure()
+
+    fig_temp_rise.add_trace(
+        go.Bar(
+            x=validation_df["Case"],
+            y=validation_df["TemperatureRise_C"],
+            name="Temperature Rise"
+        )
+    )
+
+    fig_temp_rise.update_layout(
+        title="Battery Temperature Rise",
+        xaxis_title="Scenario",
+        yaxis_title="Temperature Rise (°C)",
+        height=450
+    )
+
+    st.plotly_chart(fig_temp_rise, use_container_width=True)
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # CURRENT / PROTECTION VALIDATION
+    # --------------------------------------------------------
+
+    st.subheader("🛡️ Current & Protection Validation")
+
+    fig_current = go.Figure()
+
+    fig_current.add_trace(
+        go.Bar(
+            x=validation_df["Case"],
+            y=validation_df["MaximumCurrent_A"],
+            name="Maximum Current"
+        )
+    )
+
+    fig_current.add_hline(
+        y=OVER_CURRENT_LIMIT,
+        line_dash="dash",
+        annotation_text="Over-Current Limit = 2.5 A"
+    )
+
+    fig_current.update_layout(
+        title="Maximum Current vs Protection Limit",
+        xaxis_title="Scenario",
+        yaxis_title="Maximum Current (A)",
+        height=450
+    )
+
+    st.plotly_chart(fig_current, use_container_width=True)
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # FAULT VALIDATION
+    # --------------------------------------------------------
+
+    st.subheader("🚨 Protection Response")
+
+    fault_display = validation_df[
+        ["Case", "MaximumCurrent_A", "BatteryFault"]
+    ].copy()
+
+    fault_display["Result"] = fault_display["BatteryFault"].apply(
+        lambda x: "🔴 FAULT TRIGGERED" if int(x) == 1 else "🟢 NO FAULT"
+    )
+
+    fault_display["Expected"] = fault_display.apply(
+        lambda row: (
+            "Fault expected"
+            if row["MaximumCurrent_A"] > OVER_CURRENT_LIMIT
+            else "No fault expected"
+        ),
+        axis=1
+    )
+
+    fault_display["Validation"] = fault_display.apply(
+        lambda row: (
+            "PASS"
+            if (
+                (
+                    row["MaximumCurrent_A"] > OVER_CURRENT_LIMIT
+                    and row["BatteryFault"] == 1
+                )
+                or
+                (
+                    row["MaximumCurrent_A"] <= OVER_CURRENT_LIMIT
+                    and row["BatteryFault"] == 0
+                )
+            )
+            else "CHECK"
+        ),
+        axis=1
+    )
+
+    fault_display.columns = [
+        "Case",
+        "Maximum Current (A)",
+        "Battery Fault",
+        "Result",
+        "Expected Response",
+        "Validation",
+    ]
+
+    st.dataframe(
+        fault_display.round(3),
+        use_container_width=True,
+        hide_index=True
+    )
+
+    protection_pass = int(
+        (
+            (
+                (validation_df["MaximumCurrent_A"] > OVER_CURRENT_LIMIT)
+                & (validation_df["BatteryFault"] == 1)
+            )
+            |
+            (
+                (validation_df["MaximumCurrent_A"] <= OVER_CURRENT_LIMIT)
+                & (validation_df["BatteryFault"] == 0)
+            )
+        ).sum()
+    )
+
+    st.metric(
+        "Protection Scenarios Passing Expected Response",
+        f"{protection_pass} / {total_cases}"
+    )
+
+    if protection_pass == total_cases:
+        st.success(
+            "🟢 Protection validation passed: every tested scenario "
+            "matches the expected current-protection response."
+        )
+    else:
+        st.warning(
+            "⚠️ Some scenarios require engineering review because the "
+            "observed protection response does not match the expected response."
+        )
+
+    st.divider()
+
+    # --------------------------------------------------------
+    # ENGINEERING INTERPRETATION
+    # --------------------------------------------------------
+
+    st.subheader("🔎 Engineering Interpretation")
+
+    st.write(
+        """
+        The validation scenarios demonstrate how the Digital Twin responds
+        to changes in battery capacity, discharge current and initial state
+        of charge.
+
+        The high-current scenario shows the trade-off between higher power
+        delivery and faster SOC depletion. The reduced-capacity scenario
+        reaches a lower final SOC under the same discharge current, while
+        the reduced-initial-SOC scenario demonstrates the effect of starting
+        with less available energy.
+
+        The over-current scenario intentionally exceeds the 2.5 A protection
+        threshold. A correctly configured Digital Twin should identify this
+        condition and assert the battery fault signal.
+        """
+    )
+
+    st.subheader("✅ Validation Conclusion")
+
+    if protection_pass == total_cases:
+        st.success(
+            "The scenario-validation dataset provides evidence that the "
+            "Digital Twin can evaluate multiple operating conditions and "
+            "correctly identify the tested protection conditions."
+        )
+    else:
+        st.warning(
+            "The Digital Twin successfully generated the scenario results, "
+            "but some protection responses require further validation."
+        )
+
 
 # DECISION SUPPORT
 
 # ============================================================
 
-
-
 elif page == "🧠 Decision Support":
 
-
-
     st.title("🧠 Decision Support")
-
-
 
     st.write(
 
@@ -2070,11 +2049,7 @@ elif page == "🧠 Decision Support":
 
     )
 
-
-
     st.divider()
-
-
 
     baseline = load_data(BASELINE_FILE)
 
@@ -2082,15 +2057,11 @@ elif page == "🧠 Decision Support":
 
     design_b = load_data(DESIGN_B_FILE)
 
-
-
     baseline_metrics = calculate_metrics(baseline)
 
     design_a_metrics = calculate_metrics(design_a)
 
     design_b_metrics = calculate_metrics(design_b)
-
-
 
     # --------------------------------------------------------
 
@@ -2098,15 +2069,9 @@ elif page == "🧠 Decision Support":
 
     # --------------------------------------------------------
 
-
-
     thermal_reduction = 0
 
-
-
     if baseline_metrics["Temperature Rise (°C)"] != 0:
-
-
 
         thermal_reduction = (
 
@@ -2124,15 +2089,9 @@ elif page == "🧠 Decision Support":
 
         )
 
-
-
     power_increase = 0
 
-
-
     if baseline_metrics["Average Power (W)"] != 0:
-
-
 
         power_increase = (
 
@@ -2150,23 +2109,15 @@ elif page == "🧠 Decision Support":
 
         )
 
-
-
     # --------------------------------------------------------
 
     # DECISION SUMMARY
 
     # --------------------------------------------------------
 
-
-
     st.subheader("📌 Engineering Decision Summary")
 
-
-
     col1, col2, col3 = st.columns(3)
-
-
 
     col1.metric(
 
@@ -2176,8 +2127,6 @@ elif page == "🧠 Decision Support":
 
     )
 
-
-
     col2.metric(
 
         "Design A Power Increase",
@@ -2185,8 +2134,6 @@ elif page == "🧠 Decision Support":
         f"{power_increase:.1f}%"
 
     )
-
-
 
     col3.metric(
 
@@ -2196,11 +2143,7 @@ elif page == "🧠 Decision Support":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -2208,11 +2151,7 @@ elif page == "🧠 Decision Support":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("🏆 Recommended Design")
-
-
 
     st.success(
 
@@ -2224,8 +2163,6 @@ elif page == "🧠 Decision Support":
 
     )
 
-
-
     st.write(
 
         """
@@ -2236,8 +2173,6 @@ elif page == "🧠 Decision Support":
 
         enhanced cooling.
 
-
-
         Design A provides higher short-term power because it
 
         operates at a higher discharge current. However,
@@ -2245,8 +2180,6 @@ elif page == "🧠 Decision Support":
         this comes with higher thermal stress and a lower
 
         remaining SOC after the same simulation duration.
-
-
 
         Therefore, Design B provides the more balanced
 
@@ -2256,11 +2189,7 @@ elif page == "🧠 Decision Support":
 
     )
 
-
-
     st.divider()
-
-
 
     # --------------------------------------------------------
 
@@ -2268,15 +2197,9 @@ elif page == "🧠 Decision Support":
 
     # --------------------------------------------------------
 
-
-
     st.subheader("⚖️ Design Trade-Off")
 
-
-
     decision_table = pd.DataFrame({
-
-
 
         "Design": [
 
@@ -2288,8 +2211,6 @@ elif page == "🧠 Decision Support":
 
         ],
 
-
-
         "Primary Advantage": [
 
             "Reference configuration",
@@ -2300,8 +2221,6 @@ elif page == "🧠 Decision Support":
 
         ],
 
-
-
         "Main Trade-Off": [
 
             "Reference performance",
@@ -2311,8 +2230,6 @@ elif page == "🧠 Decision Support":
             "Requires enhanced cooling"
 
         ],
-
-
 
         "Recommended Use": [
 
@@ -2326,8 +2243,6 @@ elif page == "🧠 Decision Support":
 
     })
 
-
-
     st.dataframe(
 
         decision_table,
@@ -2338,11 +2253,7 @@ elif page == "🧠 Decision Support":
 
     )
 
-
-
     st.divider()
-
-
 
     st.info(
 
@@ -2358,11 +2269,7 @@ elif page == "🧠 Decision Support":
 
 if page == "🔗 Traceability":
 
-
-
     st.title("🔗 Traceability")
-
-
 
     st.write(
 
@@ -2374,11 +2281,7 @@ if page == "🔗 Traceability":
 
             )
 
-
-
 st.divider()
-
-
 
 # --------------------------------------------------------
 
@@ -2386,15 +2289,9 @@ st.divider()
 
 # --------------------------------------------------------
 
-
-
 st.subheader("📋 Engineering Requirements")
 
-
-
 requirements = pd.DataFrame({
-
-
 
     "Requirement": [
 
@@ -2411,8 +2308,6 @@ requirements = pd.DataFrame({
         "Safety validation"
 
     ],
-
-
 
     "Target / Definition": [
 
@@ -2432,8 +2327,6 @@ requirements = pd.DataFrame({
 
 })
 
-
-
 st.dataframe(
 
     requirements,
@@ -2444,11 +2337,7 @@ st.dataframe(
 
 )
 
-
-
 st.divider()
-
-
 
 # --------------------------------------------------------
 
@@ -2456,15 +2345,9 @@ st.divider()
 
 # --------------------------------------------------------
 
-
-
 st.subheader("🔄 Requirement → Model → Result")
 
-
-
 traceability = pd.DataFrame({
-
-
 
     "Engineering Aspect": [
 
@@ -2480,8 +2363,6 @@ traceability = pd.DataFrame({
 
     ],
 
-
-
     "Model / Logic": [
 
         "Equivalent Circuit Battery",
@@ -2496,8 +2377,6 @@ traceability = pd.DataFrame({
 
     ],
 
-
-
     "Simulation Evidence": [
 
         "Battery voltage and SOC response",
@@ -2511,8 +2390,6 @@ traceability = pd.DataFrame({
         "Design comparison metrics"
 
     ],
-
-
 
     "Engineering Decision": [
 
@@ -2530,8 +2407,6 @@ traceability = pd.DataFrame({
 
 })
 
-
-
 st.dataframe(
 
     traceability,
@@ -2542,11 +2417,7 @@ st.dataframe(
 
 )
 
-
-
 st.divider()
-
-
 
 # --------------------------------------------------------
 
@@ -2554,19 +2425,11 @@ st.divider()
 
 # --------------------------------------------------------
 
-
-
 st.subheader("🧪 Validation Evidence")
-
-
 
 col1, col2 = st.columns(2)
 
-
-
 with col1:
-
-
 
     st.success(
 
@@ -2576,11 +2439,7 @@ with col1:
 
     )
 
-
-
 with col2:
-
-
 
     st.error(
 
@@ -2592,11 +2451,7 @@ with col2:
 
     )
 
-
-
 st.divider()
-
-
 
 # --------------------------------------------------------
 
@@ -2604,11 +2459,7 @@ st.divider()
 
 # --------------------------------------------------------
 
-
-
 st.subheader("🏆 Traceable Design Decision")
-
-
 
 st.info(
 
@@ -2622,8 +2473,6 @@ st.info(
 
 )
 
-
-
 st.write(
 
     "Decision basis: electrical performance, thermal "
@@ -2634,11 +2483,7 @@ st.write(
 
 )
 
-
-
 st.divider()
-
-
 
 # --------------------------------------------------------
 
@@ -2646,11 +2491,7 @@ st.divider()
 
 # --------------------------------------------------------
 
-
-
 st.subheader("🔗 Digital Twin Data Flow")
-
-
 
 st.code(
 
