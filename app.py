@@ -1,7 +1,5 @@
 import streamlit as st
 
-import hmac
-
 import math
 
 import pandas as pd
@@ -25,45 +23,6 @@ st.set_page_config(
     layout="wide"
 
 )
-
-# ============================================================
-
-# ============================================================
-# PASSWORD PROTECTION
-# ============================================================
-
-def check_password():
-    if st.session_state.get("authenticated", False):
-        return True
-
-    st.title("🔐 Battery Twin — Secure Access")
-    st.write("Enter the password to access the Battery Digital Twin platform.")
-
-    password = st.text_input(
-        "Password",
-        type="password",
-        key="login_password"
-    )
-
-    if st.button("Login", type="primary"):
-        try:
-            correct_password = st.secrets["APP_PASSWORD"]
-        except Exception:
-            st.error("APP_PASSWORD is not configured in Streamlit secrets.")
-            return False
-
-        if hmac.compare_digest(password, correct_password):
-            st.session_state["authenticated"] = True
-            st.rerun()
-        else:
-            st.error("❌ Incorrect password")
-
-    return False
-
-
-if not check_password():
-    st.stop()
-
 
 # FILE NAMES
 
